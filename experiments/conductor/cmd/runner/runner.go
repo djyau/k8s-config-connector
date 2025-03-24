@@ -44,27 +44,33 @@ conductor runner --branch-repo=/usr/local/google/home/wfender/go/src/github.com/
 	readFileTypeFlag        = "file-type"
 
 	// Command values
-	cmdHelp                = 0
-	cmdCheckRepo           = 1
-	cmdCreateGitBranch     = 2
-	cmdDeleteGitBranch     = 3
-	cmdEnableGCPAPIs       = 4
-	cmdReadFiles           = 5
-	cmdWriteFiles          = 6
-	cmdDiff                = 7
-	cmdRevert              = 8
-	cmdCreateScriptYaml    = 10
-	cmdCaptureHttpLog      = 11
-	cmdGenerateMockGo      = 12
-	cmdAddServiceRoundTrip = 13
-	cmdAddProtoMakefile    = 14
-	cmdBuildProto          = 15
-	cmdRunMockTests        = 16
-	cmdGenerateTypes       = 20
-	cmdAdjustTypes         = 21
-	cmdGenerateCRD         = 22
-	cmdGenerateMapper      = 23
-	cmdGenerateFuzzer      = 24
+	cmdDeleteGitBranch         = -5
+	cmdHelp                    = 0
+	cmdCheckRepo               = 1
+	cmdCreateGitBranch         = 2
+	cmdEnableGCPAPIs           = 4
+	cmdReadFiles               = 5
+	cmdWriteFiles              = 6
+	cmdDiff                    = 7
+	cmdRevert                  = 8
+	cmdPushBranch              = 9 // New command for force pushing branches
+	cmdCreateScriptYaml        = 10
+	cmdCaptureHttpLog          = 11
+	cmdGenerateMockGo          = 12
+	cmdAddServiceRoundTrip     = 13
+	cmdAddProtoMakefile        = 14
+	cmdBuildProto              = 15
+	cmdRunMockTests            = 16
+	cmdGenerateTypes           = 20
+	cmdAdjustTypes             = 21
+	cmdGenerateCRD             = 22
+	cmdGenerateMapper          = 23
+	cmdGenerateFuzzer          = 24
+	cmdControllerClient        = 40
+	cmdGenerateController      = 41
+	cmdCreateIdentity          = 43
+	cmdControllerCreateTest    = 44
+	cmdCaptureGoldenTestOutput = 45
 
 	typeScriptYaml = "scriptyaml"
 	typeHttpLog    = "httplog"
@@ -108,6 +114,8 @@ func BuildRunnerCmd() *cobra.Command {
 		"n", 0, "Number of commits to diff/revert (default: 0)")
 	cmd.Flags().BoolVarP(&opts.verbose, "verbose",
 		"v", false, "Enable verbose output logging")
+	cmd.Flags().StringVarP(&opts.branchSuffix, "branch-suffix",
+		"", "", "Suffix to append to remote branch names when pushing")
 
 	return cmd
 }
@@ -125,9 +133,10 @@ type RunnerOptions struct {
 	// forResourcesRegex filters branches, only branches that match the regex are processed
 	forResourcesRegex string
 
-	force      bool // Force flag to override file existence checks
-	numCommits int  // Number of commits to diff (default: 1)
-	verbose    bool // Verbose output flag
+	force        bool   // Force flag to override file existence checks
+	numCommits   int    // Number of commits to diff (default: 1)
+	verbose      bool   // Verbose output flag
+	branchSuffix string // Suffix to append to remote branch names when pushing
 }
 
 func (opts *RunnerOptions) validateFlags() error {
@@ -185,6 +194,14 @@ func RunRunner(ctx context.Context, opts *RunnerOptions) error {
 
 	if opts.loggingDir == "" {
 		return fmt.Errorf("logging-dir is required")
+	}
+	// If loggingDir is a relative path, make it absolute by prepending the current working directory
+	if !filepath.IsAbs(opts.loggingDir) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getting current working directory: %w", err)
+		}
+		opts.loggingDir = filepath.Join(cwd, opts.loggingDir)
 	}
 
 	if err := opts.validateFlags(); err != nil {
@@ -248,6 +265,11 @@ func RunRunner(ctx context.Context, opts *RunnerOptions) error {
 	}
 
 	switch opts.command {
+	case cmdDeleteGitBranch: // -5
+		for idx, branch := range branches.Branches {
+			log.Printf("Delete GitHub Branch: %d name: %s, branch: %s\r\n", idx, branch.Name, branch.Local)
+			deleteGithubBranch(opts, branch)
+		}
 	case -4:
 		fixMetadata(opts, branches, "Skip(with reason)", setSkipOnBranchModifier)
 	case -3:
@@ -270,11 +292,6 @@ func RunRunner(ctx context.Context, opts *RunnerOptions) error {
 			*/
 			log.Printf("Create GitHub Branch: %d name: %s, branch: %s\r\n", idx, branch.Name, branch.Local)
 			createGithubBranch(opts, branch)
-		}
-	case cmdDeleteGitBranch: // 3
-		for idx, branch := range branches.Branches {
-			log.Printf("Delete GitHub Branch: %d name: %s, branch: %s\r\n", idx, branch.Name, branch.Local)
-			deleteGithubBranch(opts, branch)
 		}
 	case cmdEnableGCPAPIs: // 4
 		for idx, branch := range branches.Branches {
@@ -322,31 +339,35 @@ func RunRunner(ctx context.Context, opts *RunnerOptions) error {
 			log.Printf("Reverting last %d commits in branch %s: %d name: %s, branch: %s\r\n", opts.numCommits, branch.Name, idx, branch.Name, branch.Local)
 			revertLastNCommits(opts, branch)
 		}
-
+	case cmdPushBranch: // 9
+		processors := []BranchProcessor{
+			{Fn: makeReadyPR, CommitMsgTemplate: "make ready-pr"},
+			{Fn: pushBranch, CommitMsgTemplate: "push branch"},
+		}
+		processBranches(ctx, opts, branches.Branches, "Pushing Branch", processors)
 	case cmdCreateScriptYaml: // 10
-		processBranches(ctx, opts, branches.Branches, "Script YAML", []BranchProcessor{{Fn: createScriptYaml, CommitMsg: "Create gcloud script.yaml"}})
+		processBranches(ctx, opts, branches.Branches, "Script YAML", []BranchProcessor{{Fn: createScriptYaml, CommitMsgTemplate: "mockgcp: create test script for {{command}}"}})
 	case cmdCaptureHttpLog: // 11
-		processBranches(ctx, opts, branches.Branches, "HTTP Log", []BranchProcessor{{Fn: captureHttpLog, CommitMsg: "Capture HTTP Log for mocks"}})
+		processBranches(ctx, opts, branches.Branches, "HTTP Log", []BranchProcessor{{Fn: captureHttpLog, CommitMsgTemplate: "mockgcp: golden output for TestScripts/mock{{group}}/testdata/{{resource}}/crud"}})
 	case cmdGenerateMockGo: // 12
-		processBranches(ctx, opts, branches.Branches, "Mock Go Files", []BranchProcessor{{Fn: generateMockGo, CommitMsg: "Add generated mock files"}})
+		processBranches(ctx, opts, branches.Branches, "Mock Go Files", []BranchProcessor{{Fn: generateMockGo, CommitMsgTemplate: "Add generated mock files"}})
 	case cmdAddServiceRoundTrip: // 13
-		processBranches(ctx, opts, branches.Branches, "Service RoundTrip", []BranchProcessor{{Fn: addServiceToRoundTrip, CommitMsg: "Add service to mock_http_roundtrip.go"}})
+		processBranches(ctx, opts, branches.Branches, "Service RoundTrip", []BranchProcessor{{Fn: addServiceToRoundTrip, CommitMsgTemplate: "mockgcp: Add mock{{group}} service to mock_http_roundtrip.go"}})
 	case cmdAddProtoMakefile: // 14
-		processBranches(ctx, opts, branches.Branches, "Proto Makefile", []BranchProcessor{{Fn: addProtoToMakefile, CommitMsg: "Add proto generation to makefile"}})
+		processBranches(ctx, opts, branches.Branches, "Proto Makefile", []BranchProcessor{{Fn: addProtoToMakefile, CommitMsgTemplate: "Add proto generation to makefile", AttemptsOnNoChange: 1}})
 	case cmdBuildProto: // 15
-		processBranches(ctx, opts, branches.Branches, "Build Proto", []BranchProcessor{{Fn: buildProtoFiles, CommitMsg: "Build and add generated proto files"}})
+		processBranches(ctx, opts, branches.Branches, "Build Proto", []BranchProcessor{{Fn: buildProtoFiles, CommitMsgTemplate: "Build and add generated proto files"}})
 	case cmdRunMockTests: // 16
-		processBranches(ctx, opts, branches.Branches, "Mock Tests", []BranchProcessor{{Fn: runMockgcpTests, CommitMsg: "Run mock tests"}})
+		processBranches(ctx, opts, branches.Branches, "Mock Tests", []BranchProcessor{{Fn: fixMockgcpFailures, CommitMsgTemplate: "Verify and Fix mock tests", VerifyFn: runMockgcpTests, VerifyAttempts: 5, AttemptsOnNoChange: 2}})
 	case cmdGenerateTypes: // 20
-		processBranches(ctx, opts, branches.Branches, "Types", []BranchProcessor{{Fn: generateTypes, CommitMsg: "Add generated types"}})
+		processBranches(ctx, opts, branches.Branches, "Types", []BranchProcessor{{Fn: generateTypes, CommitMsgTemplate: "Add generated types"}})
 	case cmdAdjustTypes: // 21
 		processors := []BranchProcessor{
-			{Fn: setTypeSpecStatus, CommitMsg: "Add spec and status to generated type"},
-			{Fn: setTypeParent, CommitMsg: "Add parent to generated type"},
-			{Fn: adjustIdentityParent, CommitMsg: "Adjust identity parent"},
-			// check capitalization of URL resource part:  pattern: "projects/{project}/locations/{location}/services/{service}/quotaInfos/{quota_info}"
-			{Fn: adjustIdentityParentNewFunction, CommitMsg: "Adjust identity parent NewIdentity method"},
-			{Fn: regenerateTypes, CommitMsg: "Regenerate types"},
+			{Fn: setTypeSpecStatus, CommitMsgTemplate: "Add spec and status to generated type"},
+			{Fn: setTypeParent, CommitMsgTemplate: "Add parent to generated type"},
+			{Fn: adjustIdentityParent, CommitMsgTemplate: "Adjust identity parent"},
+			//{Fn: adjustIdentityParentNewFunction, CommitMsg: "Adjust identity parent NewIdentity method"},
+			{Fn: regenerateTypes, CommitMsgTemplate: "Regenerate types"},
 			// preferred manual: Add something for Capitalization of Abbreviations: any acronyms that are not all caps should be all caps
 			// manual: Add something to handle references to other resources: https://github.com/GoogleCloudPlatform/k8s-config-connector/pull/4010/commits/1651a0a7af5bca37b5c2e134dd3f600ebac6a172
 			// * https://github.com/GoogleCloudPlatform/k8s-config-connector/pull/4017/commits/cc726106aff55d41e6bc94272acc3612f2636397
@@ -354,12 +375,28 @@ func RunRunner(ctx context.Context, opts *RunnerOptions) error {
 		}
 		processBranches(ctx, opts, branches.Branches, "Adjusting types", processors)
 	case cmdGenerateCRD: // 22
-		processBranches(ctx, opts, branches.Branches, "CRD", []BranchProcessor{{Fn: generateCRD, CommitMsg: "Add generated CRD"}})
+		processBranches(ctx, opts, branches.Branches, "CRD", []BranchProcessor{{Fn: generateCRD, CommitMsgTemplate: "Add generated CRD"}})
 	case cmdGenerateMapper: // 23
-		processBranches(ctx, opts, branches.Branches, "Mapper", []BranchProcessor{{Fn: generateMapper, CommitMsg: "Add generated mapper"}})
+		processBranches(ctx, opts, branches.Branches, "Mapper", []BranchProcessor{{Fn: generateMapper, CommitMsgTemplate: "Add generated mapper"}})
 		// handle references to other resources: https://github.com/GoogleCloudPlatform/k8s-config-connector/pull/4010/commits/1651a0a7af5bca37b5c2e134dd3f600ebac6a172
 	case cmdGenerateFuzzer: // 24
-		processBranches(ctx, opts, branches.Branches, "Fuzzer", []BranchProcessor{{Fn: generateFuzzer, CommitMsg: "Add generated fuzzer"}})
+		processBranches(ctx, opts, branches.Branches, "Fuzzer", []BranchProcessor{{Fn: generateFuzzer, CommitMsgTemplate: "Add generated fuzzer"}})
+	case cmdControllerClient: // 40
+		processBranches(ctx, opts, branches.Branches, "Controller Client", []BranchProcessor{{Fn: generateControllerClient, CommitMsgTemplate: "Add controller client"}})
+	case cmdGenerateController: // 41
+		processBranches(ctx, opts, branches.Branches, "Controller", []BranchProcessor{{Fn: generateController, CommitMsgTemplate: "Add controller"}})
+	case cmdCreateIdentity: // 43
+		processBranches(ctx, opts, branches.Branches, "Identity and Reference", []BranchProcessor{
+			{Fn: generateControllerIdentity, CommitMsgTemplate: "Add controller identity"},
+			{Fn: generateControllerReference, CommitMsgTemplate: "Add controller reference"},
+		})
+	case cmdControllerCreateTest: // 44
+		processBranches(ctx, opts, branches.Branches, "Controller Test", []BranchProcessor{
+			{Fn: createControllerTest, CommitMsgTemplate: "Create minimal test"},
+			{Fn: updateTestHarness, CommitMsgTemplate: "Support for testing with mockgcp"},
+		})
+	case cmdCaptureGoldenTestOutput: // 45
+		processBranches(ctx, opts, branches.Branches, "Golden Test Output", []BranchProcessor{{Fn: captureGoldenTestOutput, CommitMsgTemplate: "Capture golden output"}})
 	default:
 		log.Fatalf("unrecognized command: %d", opts.command)
 	}
@@ -372,24 +409,30 @@ func printHelp() {
 	log.Println("\t0 - Print help")
 	log.Println("\t1 - [Validate] Repo directory and metadata")
 	log.Println("\t2 - [Branch] Create the local github branches from the metadata")
-	log.Println("\t3 - [Branch] Delete the local github branches from the metadata")
+	log.Println("\t3 - [Branch] Moved to -5. Delete the local github branches from the metadata")
 	log.Println("\t4 - [Project] Enable GCP APIs for each branch")
 	log.Println("\t5 - [Generated] Read the specific type of generated files in each github branch")
 	log.Println("\t6 - [Generated] Write the specific type of files from all_scripts.yaml to each github branch")
 	log.Println("\t7 - [Git] Show diff of last N commits in each branch (use -n to specify N)")
 	log.Println("\t8 - [Git] Revert last N commits in each branch (use -n to specify N)")
+	log.Println("\t9 - [Git] Make ready-pr and push each branch to origin. Use --branch-suffix to specify a suffix for the remote branch if needed")
 	log.Println("\t10 - [Mock] Create script.yaml for mock gcp generation in each github branch")
 	log.Println("\t11 - [Mock] Create _http.log for mock gcp generation in each github branch")
 	log.Println("\t12 - [Mock] Generate mock Service and Resource go files in each github branch")
 	log.Println("\t13 - [Mock] Add service to mock_http_roundtrip.go in each github branch")
 	log.Println("\t14 - [Mock] Add proto to makefile in each github branch")
 	log.Println("\t15 - [Proto] Build proto files in mockgcp directory")
-	log.Println("\t16 - [Mock] Run mockgcptests on generated mocks in each github branch")
+	log.Println("\t16 - [Mock] Run and Fix mockgcp tests in each github branch")
 	log.Println("\t20 - [CRD] Generate Types for each branch")
 	log.Println("\t21 - [CRD] Adjust the types for each branch")
 	log.Println("\t22 - [CRD] Generate CRD for each branch")
 	log.Println("\t23 - [CRD] Generate Mapper for each branch")
 	log.Println("\t24 - [CRD] Generate Fuzzer for each branch")
+	log.Println("\t40 - [Controller] Generate controller client for each branch")
+	log.Println("\t41 - [Controller] Generate controller for each branch")
+	log.Println("\t43 - [Controller] [optional, simialr to 20, 21] Create identity and reference files for each branch")
+	log.Println("\t44 - [Controller] Create minimal test files for each branch")
+	log.Println("\t45 - [Controller] Capture golden test output for each branch")
 }
 
 func checkRepoDir(opts *RunnerOptions, branches Branches) {
@@ -724,11 +767,11 @@ func inferProtoPath(opts *RunnerOptions, branch Branch, workDir string) string {
 	}
 
 	cfg := CommandConfig{
-		Name:       "Search for service",
-		Cmd:        "egrep",
-		Args:       args,
-		WorkDir:    workDir,
-		MaxRetries: 2,
+		Name:        "Search for service",
+		Cmd:         "egrep",
+		Args:        args,
+		WorkDir:     workDir,
+		MaxAttempts: 2,
 	}
 	output, err := executeCommand(opts, cfg)
 	if err != nil {
@@ -747,11 +790,11 @@ func inferProtoPath(opts *RunnerOptions, branch Branch, workDir string) string {
 			}
 
 			cfg = CommandConfig{
-				Name:       "Search for any service",
-				Cmd:        "egrep",
-				Args:       args,
-				WorkDir:    workDir,
-				MaxRetries: 2,
+				Name:        "Search for any service",
+				Cmd:         "egrep",
+				Args:        args,
+				WorkDir:     workDir,
+				MaxAttempts: 2,
 			}
 			output, err = executeCommand(opts, cfg)
 			if err != nil {
@@ -837,11 +880,11 @@ func setSkipOnBranchModifier(opts *RunnerOptions, branch Branch, workDir string)
 	// Keep if any of CRUD is supported
 	// args = append(args, "--help")
 	cfg := CommandConfig{
-		Name:       "Check CRUD Support",
-		Cmd:        "gcloud",
-		Args:       args,
-		WorkDir:    workDir,
-		MaxRetries: 1,
+		Name:        "Check CRUD Support",
+		Cmd:         "gcloud",
+		Args:        args,
+		WorkDir:     workDir,
+		MaxAttempts: 1,
 	}
 	op, _ := executeCommand(opts, cfg)
 	// todo: shall we keep when gcloud xxx --help returns error?
@@ -872,8 +915,8 @@ func diffLastNCommits(opts *RunnerOptions, branch Branch) {
 			"-r",
 			fmt.Sprintf("HEAD~%d", opts.numCommits),
 		},
-		WorkDir:    workDir,
-		MaxRetries: 1,
+		WorkDir:     workDir,
+		MaxAttempts: 1,
 	}
 	output, err := executeCommand(opts, cfg)
 	if err != nil {
@@ -902,8 +945,8 @@ func revertLastNCommits(opts *RunnerOptions, branch Branch) {
 			fmt.Sprintf("-n%d", opts.numCommits),
 			"--oneline",
 		},
-		WorkDir:    workDir,
-		MaxRetries: 1,
+		WorkDir:     workDir,
+		MaxAttempts: 1,
 	}
 	output, err := executeCommand(opts, cfg)
 	if err != nil {
@@ -958,8 +1001,8 @@ func revertLastNCommits(opts *RunnerOptions, branch Branch) {
 			"--hard",
 			fmt.Sprintf("HEAD~%d", opts.numCommits),
 		},
-		WorkDir:    workDir,
-		MaxRetries: 1,
+		WorkDir:     workDir,
+		MaxAttempts: 1,
 	}
 	output, err = executeCommand(opts, cfg)
 	if err != nil {

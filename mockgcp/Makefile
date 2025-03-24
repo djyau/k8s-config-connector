@@ -95,6 +95,7 @@ gen-proto-no-fixup:
 		./third_party/googleapis/mockgcp/cloud/billing/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/certificatemanager/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/tasks/v2/*.proto \
+		./third_party/googleapis/mockgcp/cloud/clouddms/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/common/*.proto \
 		./third_party/googleapis/mockgcp/cloud/compute/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/documentai/v1/*.proto \
@@ -111,6 +112,7 @@ gen-proto-no-fixup:
 		./third_party/googleapis/mockgcp/cloud/gkemulticloud/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/kms/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/managedkafka/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/deploy/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/networkservices/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/privilegedaccessmanager/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/pubsublite/v1/*.proto \
@@ -145,7 +147,6 @@ gen-proto-no-fixup:
 		./third_party/googleapis/mockgcp/cloud/bigquery/reservation/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/notebooks/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/orchestration/airflow/service/v1/*.proto \
-		./third_party/googleapis/mockgcp/cloud/backupdr/v1/*.proto \
 		./third_party/googleapis/mockgcp/api/cloudquotas/v1beta/*.proto \
 		./third_party/googleapis/mockgcp/cloud/asset/v1/*.proto \
 		./third_party/googleapis/mockgcp/cloud/aiplatform/v1beta1/schedule.proto \
@@ -165,8 +166,16 @@ gen-proto-no-fixup:
 		./third_party/googleapis/mockgcp/cloud/aiplatform/v1beta1/ui_pipeline_spec.proto \
 		./third_party/googleapis/mockgcp/cloud/aiplatform/v1beta1/pipeline_failure_policy.proto \
 		./third_party/googleapis/mockgcp/cloud/aiplatform/v1beta1/value.proto \
-		./third_party/googleapis/mockgcp/cloud/datacatalog/v1/*.proto
-
+		./third_party/googleapis/mockgcp/cloud/datacatalog/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/eventarc/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/backupdr/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/essentialcontacts/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/networkmanagement/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/netapp/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/dataplex/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/vmwareengine/v1/*.proto \
+		./third_party/googleapis/mockgcp/cloud/kms/v1/resources.proto \
+		./third_party/googleapis/mockgcp/cloud/recaptchaenterprise/v1/*.proto
 
 .PHONY: generate-grpc-for-google-protos
 generate-grpc-for-google-protos:

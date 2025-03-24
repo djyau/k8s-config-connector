@@ -33,19 +33,24 @@ const (
 )
 
 var commandMap = map[int64]string{
-	cmdEnableGCPAPIs:       "enablegcpapis",
-	cmdCreateScriptYaml:    "createscriptyaml",
-	cmdCaptureHttpLog:      "capturehttplog",
-	cmdGenerateMockGo:      "generatemockgo",
-	cmdAddServiceRoundTrip: "addserviceroundtrip",
-	cmdAddProtoMakefile:    "addprotomakefile",
-	cmdRunMockTests:        "runmocktests",
-	cmdGenerateTypes:       "generatetypes",
-	cmdGenerateCRD:         "generatecrd",
-	cmdGenerateFuzzer:      "generatefuzzer",
-	cmdBuildProto:          "buildproto",
-	cmdAdjustTypes:         "adjusttypes",
-	cmdGenerateMapper:      "generatemapper",
+	cmdEnableGCPAPIs:           "enablegcpapis",
+	cmdCreateScriptYaml:        "createscriptyaml",
+	cmdCaptureHttpLog:          "capturehttplog",
+	cmdGenerateMockGo:          "generatemockgo",
+	cmdAddServiceRoundTrip:     "addserviceroundtrip",
+	cmdAddProtoMakefile:        "addprotomakefile",
+	cmdRunMockTests:            "runmocktests",
+	cmdGenerateTypes:           "generatetypes",
+	cmdGenerateCRD:             "generatecrd",
+	cmdGenerateFuzzer:          "generatefuzzer",
+	cmdBuildProto:              "buildproto",
+	cmdAdjustTypes:             "adjusttypes",
+	cmdGenerateMapper:          "generatemapper",
+	cmdControllerClient:        "controllerclient",
+	cmdGenerateController:      "generatecontroller",
+	cmdCreateIdentity:          "createidentity",
+	cmdControllerCreateTest:    "controllercreatetest",
+	cmdCaptureGoldenTestOutput: "capturegoldentestoutput",
 }
 
 type exitBash func()
@@ -202,7 +207,7 @@ func gitAdd(ctx context.Context, workDir string, files ...string) error {
 
 func gitCommit(ctx context.Context, workDir string, msg string) error {
 	log.Printf("COMMAND: git commit -m %q", msg)
-	gitcommit := exec.CommandContext(ctx, "git", "commit", "-m", fmt.Sprintf("conductor: %q", msg))
+	gitcommit := exec.CommandContext(ctx, "git", "commit", "-m", msg)
 	gitcommit.Dir = workDir
 
 	results, err := execCommand(gitcommit)
@@ -245,6 +250,23 @@ func gitFileHasChange(workDir string, filePath string) bool {
 		return false
 	}
 	return len(strings.TrimSpace(out.String())) > 0
+}
+
+func gitRevert(ctx context.Context, workDir string, filePath string) error {
+	log.Printf("COMMAND: git checkout -- %s", filePath)
+	args := []string{"checkout", "--", filePath}
+	gitcheckout := exec.CommandContext(ctx, "git", args...)
+	gitcheckout.Dir = workDir
+
+	results, err := execCommand(gitcheckout)
+	if err != nil {
+		log.Printf("Git checkout on file %s/%s error: %v", workDir, filePath, err)
+		return err
+	}
+	if results.Stdout != "" {
+		log.Printf("Git checkout output: %s", formatCommandOutput(results.Stdout))
+	}
+	return nil
 }
 
 type closer func()
@@ -332,7 +354,7 @@ type CommandConfig struct {
 	Stdin        io.Reader         // Optional stdin
 	Env          map[string]string // Optional environment variables
 	Timeout      time.Duration     // Timeout duration (default 5m)
-	MaxRetries   int               // Maximum number of retries allowed for this command
+	MaxAttempts  int               // Maximum number of attempts allowed for this command to run
 	RetryBackoff time.Duration     // Time to wait between retries (default 1s)
 }
 
@@ -352,8 +374,8 @@ func executeCommand(opts *RunnerOptions, cfg CommandConfig) (ExecResults, error)
 
 	maxRetries := opts.defaultRetries
 	// If MaxRetries is set in config, cap it at that
-	if cfg.MaxRetries > 0 && cfg.MaxRetries < maxRetries {
-		maxRetries = cfg.MaxRetries
+	if cfg.MaxAttempts > 0 && cfg.MaxAttempts < maxRetries {
+		maxRetries = cfg.MaxAttempts
 	}
 
 	var lastErr error
@@ -408,7 +430,7 @@ func executeCommand(opts *RunnerOptions, cfg CommandConfig) (ExecResults, error)
 
 		output = outBuf.String()
 		errOutput = errBuf.String()
-		exitCode := cmd.ProcessState.ExitCode()
+		exitCode = cmd.ProcessState.ExitCode()
 
 		if err == nil {
 			log.Printf("[%s] SUCCESS (%v)", cfg.Name, diff)
@@ -445,11 +467,11 @@ func runLinters(opts *RunnerOptions) error {
 	log.Printf("Running linters")
 
 	cfg := CommandConfig{
-		Name:       "Go Fmt",
-		Cmd:        "go",
-		Args:       []string{"fmt", "./..."},
-		WorkDir:    opts.branchRepoDir,
-		MaxRetries: 1,
+		Name:        "Go Fmt",
+		Cmd:         "go",
+		Args:        []string{"fmt", "./..."},
+		WorkDir:     opts.branchRepoDir,
+		MaxAttempts: 1,
 	}
 	op, err := executeCommand(opts, cfg)
 	if err != nil {
@@ -466,11 +488,11 @@ func checkMakeReadyPR(opts *RunnerOptions) error {
 	log.Printf("Running make ready-pr verification")
 
 	cfg := CommandConfig{
-		Name:       "Make Ready-PR",
-		Cmd:        "make",
-		Args:       []string{"ready-pr"},
-		WorkDir:    opts.branchRepoDir,
-		MaxRetries: 1,
+		Name:        "Make Ready-PR",
+		Cmd:         "make",
+		Args:        []string{"ready-pr"},
+		WorkDir:     opts.branchRepoDir,
+		MaxAttempts: 1,
 	}
 
 	if _, err := executeCommand(opts, cfg); err != nil {
@@ -527,37 +549,44 @@ func stageChanges(ctx context.Context, opts *RunnerOptions, paths []string, comm
 	return nil
 }
 
-type BranchProcessorFn func(ctx context.Context, opts *RunnerOptions, branch Branch) ([]string, error)
+type BranchProcessorFn func(ctx context.Context, opts *RunnerOptions, branch Branch, execResults *ExecResults) ([]string, *ExecResults, error)
 type BranchProcessor struct {
-	CommitMsg string
-	Fn        BranchProcessorFn
+	CommitMsgTemplate  string
+	Fn                 BranchProcessorFn
+	AttemptsOnNoChange int
+	VerifyFn           BranchProcessorFn
+	VerifyAttempts     int
 }
 
-// processBranch handles the processing of a single branch
-func processBranch(ctx context.Context, opts *RunnerOptions, branch Branch, description string, processor BranchProcessor) error {
-	log.Printf("Processing branch %s: %s, processor: %s", branch.Name, description, processor.CommitMsg)
+func (b *BranchProcessor) CommitMsg(branch Branch) string {
+	s := b.CommitMsgTemplate
+	s = strings.ReplaceAll(s, "{{command}}", branch.Command)
+	s = strings.ReplaceAll(s, "{{group}}", branch.Group)
+	s = strings.ReplaceAll(s, "{{resource}}", branch.Resource)
+	return s
+}
 
-	// Skip if branch should be skipped
-	if branch.Skip {
-		log.Printf("Skipping branch %s: marked as Skip", branch.Name)
-		return nil
-	}
-
-	close := setLoggingWriter(opts, branch)
-	defer close()
-
-	checkoutBranch(ctx, branch, opts.branchRepoDir)
-
+// runBranchFnWithRetries runs the processor multiple times until changes are detected and commits them
+func runBranchFnWithRetriesAndCommit(ctx context.Context, opts *RunnerOptions, branch Branch, description string, processor BranchProcessor, commitMsg string, inExecResults *ExecResults) (*ExecResults, error) {
 	// Try running processor up to N times until we see changes in all affected paths
-	maxAttempts := 3
+	var execResults *ExecResults
+	if commitMsg == "" {
+		commitMsg = processor.CommitMsg(branch)
+	}
+	maxAttempts := processor.AttemptsOnNoChange
+	if maxAttempts == 0 {
+		maxAttempts = 3
+	}
 	attempt := 0
 	var affectedPaths []string
+	lintFailure := false
+	goCmdsFailure := false
 	for attempt < maxAttempts {
 		var err error
 		attempt++
 		// Process the branch
-		log.Printf("Processing branch %s: %s, processor: %s (attempt: %d/%d)", branch.Name, description, processor.CommitMsg, attempt, maxAttempts)
-		affectedPaths, err = processor.Fn(ctx, opts, branch)
+		log.Printf("Running BranchFn for branch %s: %s, processor: %s (attempt: %d/%d)", branch.Name, description, commitMsg, attempt, maxAttempts)
+		affectedPaths, execResults, err = processor.Fn(ctx, opts, branch, inExecResults)
 		if err != nil {
 			log.Printf("failed to process branch %s on attempt %d: %v", branch.Name, attempt, err)
 			break
@@ -578,6 +607,18 @@ func processBranch(ctx context.Context, opts *RunnerOptions, branch Branch, desc
 			}
 		}
 
+		lintFailure = false
+		goCmdsFailure = false
+		// Run go mod tidy
+		if err := runGoCmds(opts, affectedPaths); err != nil {
+			log.Printf("go cmds failed for branch %s: %v", branch.Name, err)
+			goCmdsFailure = true
+		}
+		// Run basic linting
+		if err := runLinters(opts); err != nil {
+			log.Printf("linting failed for branch %s: %v", branch.Name, err)
+			lintFailure = true
+		}
 		// Exit loop if we saw changes or hit max attempts
 		if allChanged || attempt >= maxAttempts {
 			break
@@ -586,24 +627,77 @@ func processBranch(ctx context.Context, opts *RunnerOptions, branch Branch, desc
 		log.Printf("No changes detected in attempt %d, retrying...", attempt)
 	}
 
-	// Run basic linting
-	lintFailure := false
-	if err := runLinters(opts); err != nil {
-		log.Printf("linting failed for branch %s: %v", branch.Name, err)
-		lintFailure = true
-	}
-
 	//if err := checkMakeReadyPR(opts); err != nil {
 	//	log.Printf("verification failed for branch %s: %v", branch.Name, err)
 	//}
 
 	// Stage and commit changes
-	commitMsg := processor.CommitMsg
 	if lintFailure {
 		commitMsg = fmt.Sprintf("%s. WARN: linting failed.", commitMsg)
 	}
+	if goCmdsFailure {
+		commitMsg = fmt.Sprintf("%s. WARN: go cmds failed.", commitMsg)
+	}
 	if err := stageChanges(ctx, opts, affectedPaths, commitMsg); err != nil {
-		return fmt.Errorf("failed to commit changes for branch %s: %w", branch.Name, err)
+		return execResults, fmt.Errorf("failed to commit changes for branch %s: %w", branch.Name, err)
+	}
+
+	return execResults, nil
+}
+
+// processBranch handles the processing of a single branch
+func processBranch(ctx context.Context, opts *RunnerOptions, branch Branch, description string, processor BranchProcessor) error {
+	log.Printf("Processing branch %s: %s, processor: %s", branch.Name, description, processor.CommitMsg(branch))
+
+	// Skip if branch should be skipped
+	if branch.Skip {
+		log.Printf("Skipping branch %s: marked as Skip", branch.Name)
+		return nil
+	}
+
+	close := setLoggingWriter(opts, branch)
+	defer close()
+
+	checkoutBranch(ctx, branch, opts.branchRepoDir)
+
+	if processor.VerifyFn == nil || processor.VerifyAttempts == 0 {
+		_, err := runBranchFnWithRetriesAndCommit(ctx, opts, branch, description, processor, "", nil)
+		return err
+	}
+
+	// If processor has a VerifyFn and max attempts, run verification loop
+	for i := 0; i < processor.VerifyAttempts; i++ {
+		var err error
+		paths, execResults, err := processor.VerifyFn(ctx, opts, branch, nil)
+		if execResults == nil {
+			log.Printf("execResults is nil for branch %s, commit message: %s", branch.Name, processor.CommitMsg(branch))
+			continue
+		}
+		if execResults.ExitCode == 0 {
+			log.Printf("Verification attempt %d succeeded for branch %s, commit message: %s", i+1, branch.Name, processor.CommitMsg(branch))
+			break
+		}
+		if err != nil {
+			log.Printf("Verification attempt %d Error: %v for branch %s, commit message: %s", i+1, err, branch.Name, processor.CommitMsg(branch))
+		} else {
+			log.Printf("Verification attempt %d failed for branch %s, commit message: %s", i+1, branch.Name, processor.CommitMsg(branch))
+		}
+		if len(paths) != 0 {
+			// Revert the changes for the failed verification
+			for _, path := range paths {
+				if err := gitRevert(ctx, opts.branchRepoDir, path); err != nil {
+					log.Printf("Failed to revert changes for branch %s: %v", branch.Name, err)
+					continue
+				}
+			}
+		}
+		log.Printf("Verification attempt %d failed for branch %s, commit message: %s", i+1, branch.Name, processor.CommitMsg(branch))
+		commitMsg := fmt.Sprintf("Autofix attempt %d. %s", i+1, processor.CommitMsg(branch))
+		_, err = runBranchFnWithRetriesAndCommit(ctx, opts, branch, description, processor, commitMsg, execResults)
+		if err != nil {
+			log.Printf("Failed to run branch %s: %v", branch.Name, err)
+			continue
+		}
 	}
 
 	return nil
@@ -619,4 +713,48 @@ func processBranches(ctx context.Context, opts *RunnerOptions, branches []Branch
 			}
 		}
 	}
+}
+
+func runGoCmds(opts *RunnerOptions, affectedPaths []string) error {
+	log.Printf("Running go mod tidy")
+	errStrings := []string{}
+
+	for _, path := range affectedPaths {
+		cfg := CommandConfig{
+			Name:        "Go Imports",
+			Cmd:         "goimports",
+			Args:        []string{"-w", path},
+			WorkDir:     opts.branchRepoDir,
+			MaxAttempts: 1,
+		}
+		op, err := executeCommand(opts, cfg)
+		if err != nil {
+			errStrings = append(errStrings, fmt.Sprintf("Error running goimports for %s: %v", path, err))
+		}
+		if op.ExitCode != 0 {
+			errStrings = append(errStrings, fmt.Sprintf("goimports failed with exit code %d for %s", op.ExitCode, path))
+		}
+	}
+
+	cfg := CommandConfig{
+		Name:        "Go Mod Tidy",
+		Cmd:         "go",
+		Args:        []string{"mod", "tidy"},
+		WorkDir:     opts.branchRepoDir,
+		MaxAttempts: 1,
+	}
+	op, err := executeCommand(opts, cfg)
+	if err != nil {
+		errStrings = append(errStrings, fmt.Sprintf("Error running go mod tidy: %v", err))
+	}
+	if op.ExitCode != 0 {
+		errStrings = append(errStrings, fmt.Sprintf("go mod tidy failed with exit code %d", op.ExitCode))
+	}
+
+	if len(errStrings) > 0 {
+		log.Printf("Error running go cmds: %s", strings.Join(errStrings, "\n"))
+		return fmt.Errorf("Error running go cmds: %s", strings.Join(errStrings, "\n"))
+	}
+
+	return nil
 }
